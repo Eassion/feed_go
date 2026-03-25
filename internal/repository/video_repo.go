@@ -102,3 +102,11 @@ func (r *VideoRepository) ChangePopularity(ctx context.Context, id uint, change 
 		Where("id = ?", id).
 		UpdateColumn("popularity", gorm.Expr("GREATEST(popularity + ?, 0)", change)).Error
 }
+
+// InTransaction 在事务中执行 fn，并将绑定事务的仓储实例传入回调。
+func (r *VideoRepository) InTransaction(ctx context.Context, fn func(txRepo *VideoRepository) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txRepo := &VideoRepository{db: tx}
+		return fn(txRepo)
+	})
+}
