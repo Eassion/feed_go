@@ -125,3 +125,70 @@ func (s *LikeService) fallbackPersistLike(ctx context.Context, like *model.Like)
 	}
 	return nil
 }
+
+// Unlike handles one unlike action with the same "MQ first, local fallback" strategy.
+func (s *LikeService) Unlike(ctx context.Context, like *model.Like) error {
+	if like == nil {
+		return errors.New("like is nil")
+	}
+	if like.VideoID == 0 || like.AccountID == 0 {
+		return errors.New("video_id and account_id are required")
+	}
+
+	if s.videoRepo != nil {
+		ok, err := s.videoRepo.IsExist(ctx, like.VideoID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("video not found")
+		}
+	}
+
+	isLiked, err := s.likeRepo.IsLiked(ctx, like.VideoID, like.AccountID)
+	if err != nil {
+		return err
+	}
+	if !isLiked {
+		return errors.New("user has not liked this video")
+	}
+
+	mysqlEnqueued := false
+	redisEnqueued := false
+	if s.likeMQ != nil {
+		if err := s.likeMQ.Unlike(ctx, like.AccountID, like.VideoID); err == nil {
+			mysqlEnqueued = true
+		}
+	}
+	if s.popularity != nil {
+		if err := s.popularity.Update(ctx, like.VideoID, -1); err == nil {
+			redisEnqueued = true
+		}
+	}
+	if mysqlEnqueued && redisEnqueued {
+		return nil
+	}
+
+	if !mysqlEnqueued {
+		deleted, err := s.likeRepo.DeleteByVideoAndAccount(ctx, like.VideoID, like.AccountID)
+		if err != nil {
+			return err
+		}
+		if !deleted {
+			return errors.New("user has not liked this video")
+		}
+		if s.videoRepo != nil {
+			if err := s.videoRepo.ChangeLikesCount(ctx, like.VideoID, -1); err != nil {
+				return err
+			}
+			if err := s.videoRepo.ChangePopularity(ctx, like.VideoID, -1); err != nil {
+				return err
+			}
+		}
+	}
+
+	if !redisEnqueued {
+		cache.UpdatePopularityCache(ctx, s.cache, like.VideoID, -1)
+	}
+	return nil
+}
